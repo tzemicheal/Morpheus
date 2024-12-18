@@ -42,8 +42,8 @@ try:
     from langchain.agents.tools import Tool
     from langchain.schema import Generation
     from langchain.schema import LLMResult
-    from langchain_community.llms import OpenAI  # pylint: disable=no-name-in-module
     from langchain_community.utilities import serpapi
+    from langchain_openai import OpenAI  # pylint: disable=no-name-in-module
 except ImportError:
     pass
 
@@ -127,9 +127,9 @@ def test_agents_simple_pipe_integration_openai(config: Config, questions: list[s
     assert float(response_match.group(1)) >= 3.7
 
 
-@pytest.mark.usefixtures("openai", "restore_environ")
+@pytest.mark.usefixtures("langchain_community", "langchain_openai", "numexpr", "openai", "restore_environ")
 @mock.patch("langchain_community.utilities.serpapi.SerpAPIWrapper.aresults")
-@mock.patch("langchain_community.llms.OpenAI._agenerate",
+@mock.patch("langchain_openai.OpenAI._agenerate",
             autospec=True)  # autospec is needed as langchain will inspect the function
 def test_agents_simple_pipe(mock_openai_agenerate: mock.AsyncMock,
                             mock_serpapi_aresults: mock.AsyncMock,
