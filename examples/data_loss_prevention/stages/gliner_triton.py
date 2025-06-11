@@ -2,13 +2,15 @@
 import torch
 import tritonclient.http as httpclient
 from gliner import GLiNER
-
+import os
+import onnxruntime as ort
 
 class GliNERTritonInference:
     
     def __init__(self, model_source_dir: str,
                  triton_model_name: str = "gliner_bi_encoder",
-                 gliner_threshold: float = 0.3):
+                 gliner_threshold: float = 0.3,
+                 onnx_run: bool = False):
         
         # We load the model locally to use its pre/post-processing functions.
         # The actual heavy inference will be done on Triton.
@@ -16,11 +18,21 @@ class GliNERTritonInference:
         self.gliner_model = GLiNER.from_pretrained(model_source_dir,
                                                    local_files_only=True,
                                                    onnx_path="model.onnx",
-                                                   map_location="cuda"
+                                                   map_location="cuda",
+                                                   load_onnx_model=True
                                                    )
         self.triton_model_name = triton_model_name
         self.gliner_threshold = gliner_threshold
         self.labels_embeddings = torch.tensor([])
+        self.onnx_model_path = os.path.join(model_source_dir, "model.onnx")
+        if onnx_run:
+            self.ort_session = ort.InferenceSession(self.onnx_model_path)
+        else:
+            self.ort_session = None
+        
+        labels_data = torch.load(os.path.join(model_source_dir,
+                                              "labels_embeddings.pt"))
+        self.labels_embeddings = labels_data["embeddings"].cpu().numpy()
         
     def post_process_results(self,  logits_tensor, raw_batch, texts) -> list:
         """
@@ -61,8 +73,8 @@ class GliNERTritonInference:
         Pre-process the data for the ONNX model.
         """
         # === 1. PRE-PROCESSING ===
-        if self.labels_embeddings.numel() == 0:
-            self.labels_embeddings = self.gliner_model.encode_labels(labels)
+        # if self.labels_embeddings.numel() == 0:
+        #     self.labels_embeddings = self.gliner_model.encode_labels(labels)
         
         model_input, raw_batch = self.gliner_model.prepare_model_inputs(
             texts, labels, prepare_entities=False
@@ -70,7 +82,7 @@ class GliNERTritonInference:
 
         # Convert torch tensors to numpy for Triton
         onnx_inputs = {
-            "labels_embeddings": self.labels_embeddings.cpu().numpy(),
+            "labels_embeddings": self.labels_embeddings,
             "input_ids": model_input["input_ids"].cpu().numpy(),
             "attention_mask": model_input["attention_mask"].cpu().numpy(),
             "words_mask": model_input["words_mask"].cpu().numpy(),
@@ -119,3 +131,26 @@ class GliNERTritonInference:
         logits = torch.from_numpy(logits_np)
 
         return self.post_process_results(logits, raw_batch, texts)
+    
+    def process_onnx(self, texts: list[str], labels: list[str]):
+        
+        if not self.ort_session:
+            return ValueError(f"Onnx session not set")
+        
+        print(f"\nRunning LOCAL ONNX prediction for {len(texts)} texts...")
+
+        # === 1. PRE-PROCESSING ===
+        print("Preprocessing input")
+        onnx_inputs, raw_batch = self.pre_process(texts, labels)
+
+        # === 2. LOCAL ONNX INFERENCE ===
+
+        # Create ONNX Runtime session
+        print("Running inference with ONNX Runtime...")
+        ort_outputs = self.ort_session.run(["output"], onnx_inputs)
+        logits_np = ort_outputs[0]
+
+        # === 3. POST-PROCESSING ===
+        print("Post-processing results...")
+        logits_tensor = torch.from_numpy(logits_np)
+        return self.post_process_results(logits_tensor, raw_batch, texts)

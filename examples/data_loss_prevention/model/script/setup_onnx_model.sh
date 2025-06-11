@@ -1,6 +1,6 @@
 #!/bin/bash
 
-echo "=== Setting up GLiNER Pure ONNX Model for Triton ==="
+echo "=== Setting up GLiNER ONNX Model for Triton ==="
 
 TRITON_MODEL_REPO="./triton_models"
 SOURCE_DIR="gliner_bi_encoder" # From your conversion script

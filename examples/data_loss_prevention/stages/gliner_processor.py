@@ -91,7 +91,7 @@ class GliNERProcessor(GpuAndCpuMixin, ControlMessageStage):
         self.fallback = fallback
         self._cache_dir = cache_dir
         self._needed_columns['dlp_findings'] = TypeId.STRING
-        self.gliner_triton = GliNERTritonInference(model_source_dir="/workspace/examples/data_loss_prevention/model/gliner_bi_encoder")
+        self.gliner_triton = GliNERTritonInference(model_source_dir="/workspace/examples/data_loss_prevention/model/triton_models/gliner_bi_encoder/1/")
 
     @property
     def name(self) -> str:
@@ -255,10 +255,12 @@ class GliNERProcessor(GpuAndCpuMixin, ControlMessageStage):
             model_entities = []
             for i in range(0, len(model_data), self._model_max_batch_size):
                 batch_data = model_data[i:i + self._model_max_batch_size]
+                
                 entities = self.gliner_triton.process(
                     batch_data,
                     self.entity_labels
                 )
+                
                 model_entities.extend(entities)
 
                 # model_entities.extend(
