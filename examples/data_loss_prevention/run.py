@@ -141,16 +141,11 @@ def main(log_level: int,
 
     pipeline.add_stage(DLPInputProcessor(config))
 
-    regex_processor = RegexProcessor(config, patterns_file=regex_file)
-    pipeline.add_stage(regex_processor)
+    pipeline.add_stage(RegexProcessor(config, patterns_file=regex_file))
 
     pipeline.add_stage(MonitorStage(config, description="Regex Processor"))
 
-    pipeline.add_stage(
-        GliNERProcessor(config,
-                        labels=list(regex_processor.patterns.keys()),
-                        model_source_dir=model_source_dir,
-                        cache_dir=str(model_cache_dir)))
+    pipeline.add_stage(GliNERProcessor(config, model_source_dir=str(model_source_dir)))
 
     pipeline.add_stage(MonitorStage(config, description="GliNER Processor"))
 
