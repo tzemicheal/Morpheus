@@ -18,6 +18,7 @@ import typing
 import numpy as np
 import torch
 import tritonclient.grpc as tritonclient
+
 if typing.TYPE_CHECKING:
     from gliner import GLiNER
 
