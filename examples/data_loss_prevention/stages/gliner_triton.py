@@ -16,7 +16,6 @@ import typing
 
 import torch
 import tritonclient.grpc as tritonclient
-
 if typing.TYPE_CHECKING:
     from gliner import GLiNER
 
@@ -41,6 +40,9 @@ class GliNERTritonInference:
         self.triton_model_name = triton_model_name
         self.gliner_threshold = gliner_threshold
         self.labels_embeddings = torch.tensor([])
+        # labels_data = torch.load(os.path.join(model_source_dir,
+        #                                      "labels_embeddings.pt"))
+        #self.labels_embeddings = labels_data["embeddings"]
         self.client = tritonclient.InferenceServerClient(url=server_url)
 
     @property
@@ -92,7 +94,7 @@ class GliNERTritonInference:
         """
         Pre-process the data for the ONNX model.
         """
-        # === 1. PRE-PROCESSING ===
+        # # === 1. PRE-PROCESSING ===
         if self.labels_embeddings.numel() == 0:
             self.labels_embeddings = self.model.encode_labels(labels)
 

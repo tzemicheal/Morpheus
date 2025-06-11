@@ -87,7 +87,9 @@ class GliNERProcessor(GpuAndCpuMixin, ControlMessageStage):
         self.fallback = fallback
         self._cache_dir = cache_dir
         self._needed_columns['dlp_findings'] = TypeId.STRING
-        self.gliner_triton = GliNERTritonInference(model_source_dir=model_source_dir, map_location=map_location)
+        self.gliner_triton = GliNERTritonInference(model_source_dir=model_source_dir,
+                                                   map_location=map_location,
+                                                   gliner_threshold=confidence_threshold)
 
     @property
     def name(self) -> str:
