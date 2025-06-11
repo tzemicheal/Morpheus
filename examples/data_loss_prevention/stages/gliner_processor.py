@@ -256,7 +256,7 @@ class GliNERProcessor(GpuAndCpuMixin, ControlMessageStage):
             for i in range(0, len(model_data), self._model_max_batch_size):
                 batch_data = model_data[i:i + self._model_max_batch_size]
                 
-                entities = self.gliner_triton.process(
+                entities = self.gliner_triton.process_onnx(
                     batch_data,
                     self.entity_labels
                 )

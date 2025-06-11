@@ -10,7 +10,7 @@ class GliNERTritonInference:
     def __init__(self, model_source_dir: str,
                  triton_model_name: str = "gliner_bi_encoder",
                  gliner_threshold: float = 0.3,
-                 onnx_run: bool = False):
+                 onnx_run: bool = True):
         
         # We load the model locally to use its pre/post-processing functions.
         # The actual heavy inference will be done on Triton.
@@ -25,15 +25,54 @@ class GliNERTritonInference:
         self.gliner_threshold = gliner_threshold
         self.labels_embeddings = torch.tensor([])
         self.onnx_model_path = os.path.join(model_source_dir, "model.onnx")
+        
         if onnx_run:
-            self.ort_session = ort.InferenceSession(self.onnx_model_path)
+        #    self.ort_session = ort.InferenceSession(self.onnx_model_path)
+            self._setup_onnx_runtime(self.onnx_model_path)
         else:
             self.ort_session = None
         
         labels_data = torch.load(os.path.join(model_source_dir,
                                               "labels_embeddings.pt"))
         self.labels_embeddings = labels_data["embeddings"].cpu().numpy()
+    
+    def _setup_onnx_runtime(self, onnx_model_path):
         
+        # Setup ONNX providers for GPU
+        providers = [
+            ('CUDAExecutionProvider', {
+                'device_id': 1,
+                'arena_extend_strategy': 'kSameAsRequested',
+                'gpu_mem_limit': 4 * 1024 * 1024 * 1024,  # 4GB
+                'cudnn_conv_algo_search': 'EXHAUSTIVE',
+                'do_copy_in_default_stream': True,
+            }),
+            'CPUExecutionProvider'  # Fallback
+        ]
+        
+        # Load ONNX session with GPU support
+        session_options = ort.SessionOptions()
+        session_options.graph_optimization_level = (
+            ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        )
+        
+        try:
+            self.ort_session = ort.InferenceSession(
+                onnx_model_path, 
+                session_options,
+                providers=providers
+            )
+            print(f"✓ ONNX session created with providers: "
+                  f"{self.ort_session.get_providers()}")
+        except Exception as e:
+            print(f"⚠️  Failed to create ONNX session with GPU, "
+                  f"trying CPU: {e}")
+            self.ort_session = ort.InferenceSession(
+                onnx_model_path, 
+                session_options,
+                providers=['CPUExecutionProvider']
+            )
+    
     def post_process_results(self,  logits_tensor, raw_batch, texts) -> list:
         """
         Post-process the results from the ONNX model.
@@ -99,11 +138,9 @@ class GliNERTritonInference:
         """
 
         # === 1. PRE-PROCESSING ===
-        print("Preprocessing input")
         onnx_inputs, raw_batch = self.pre_process(texts, labels)
 
         # === 2. TRITON INFERENCE ===
-        print("Sending request to Triton server...")
         client = httpclient.InferenceServerClient(url="localhost:8000")
 
         # Create InferInput objects
@@ -127,30 +164,8 @@ class GliNERTritonInference:
         logits_np = response.as_numpy("output")
      
         # === 3. POST-PROCESSING ===
-        print("Decoding entities...")
+       # print("Decoding entities...")
         logits = torch.from_numpy(logits_np)
 
         return self.post_process_results(logits, raw_batch, texts)
-    
-    def process_onnx(self, texts: list[str], labels: list[str]):
-        
-        if not self.ort_session:
-            return ValueError(f"Onnx session not set")
-        
-        print(f"\nRunning LOCAL ONNX prediction for {len(texts)} texts...")
-
-        # === 1. PRE-PROCESSING ===
-        print("Preprocessing input")
-        onnx_inputs, raw_batch = self.pre_process(texts, labels)
-
-        # === 2. LOCAL ONNX INFERENCE ===
-
-        # Create ONNX Runtime session
-        print("Running inference with ONNX Runtime...")
-        ort_outputs = self.ort_session.run(["output"], onnx_inputs)
-        logits_np = ort_outputs[0]
-
-        # === 3. POST-PROCESSING ===
-        print("Post-processing results...")
-        logits_tensor = torch.from_numpy(logits_np)
-        return self.post_process_results(logits_tensor, raw_batch, texts)
+       
