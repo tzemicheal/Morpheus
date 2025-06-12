@@ -76,11 +76,17 @@ MORPHEUS_ROOT = os.environ.get('MORPHEUS_ROOT', os.path.abspath(os.path.join(CUR
               show_default=True,
               help=("Number of samples to use from each dataset, ignored if --input_file is set, "
                     "set to -1 for all samples."))
+@click.option('--split_paragraphs',
+              is_flag=True,
+              default=False,
+              show_default=True,
+              help="Split incoming text by new line characters.")
 @click.option('--repeat',
               type=int,
               default=1,
               show_default=True,
               help=("Repeat the input dataset, useful for testing. A value of 1 means no repeat."))
+@click.option("--server_url", required=True, help="Tritonserver url.", default="localhost:8001")
 @click.option('--model_max_batch_size',
               type=int,
               default=16,
@@ -91,11 +97,6 @@ MORPHEUS_ROOT = os.environ.get('MORPHEUS_ROOT', os.path.abspath(os.path.join(CUR
               help="Directory containing the GliNER model files",
               type=click.Path(exists=True, dir_okay=True, file_okay=False, readable=True, resolve_path=True),
               default=os.path.join(CUR_DIR, "model/gliner_bi_encoder"),
-              show_default=True)
-@click.option('--model_cache_dir',
-              help="Directory to cache the GliNER model",
-              type=click.Path(exists=False, dir_okay=True, file_okay=False, writable=True, resolve_path=True),
-              default=os.path.join(MORPHEUS_ROOT, ".cache/gliner"),
               show_default=True)
 @click.option("--out_file",
               help="Output file",
@@ -109,10 +110,11 @@ def main(log_level: int,
          input_file: pathlib.Path | None,
          include_privacy_masks: bool,
          num_samples: int,
+         split_paragraphs: bool,
          repeat: int,
+         server_url: str,
          model_max_batch_size: int,
          model_source_dir: pathlib.Path,
-         model_cache_dir: pathlib.Path,
          out_file: pathlib.Path):
     configure_logging(log_level=log_level)
 
@@ -139,13 +141,15 @@ def main(log_level: int,
 
     pipeline.add_stage(MonitorStage(config, description="Datasets Source"))
 
-    pipeline.add_stage(DLPInputProcessor(config))
+    pipeline.add_stage(DLPInputProcessor(config, split_paragraphs=split_paragraphs))
+
+    pipeline.add_stage(MonitorStage(config, description="Input Processor"))
 
     pipeline.add_stage(RegexProcessor(config, patterns_file=regex_file))
 
     pipeline.add_stage(MonitorStage(config, description="Regex Processor"))
 
-    pipeline.add_stage(GliNERProcessor(config, model_source_dir=str(model_source_dir)))
+    pipeline.add_stage(GliNERProcessor(config, server_url=server_url, model_source_dir=str(model_source_dir)))
 
     pipeline.add_stage(MonitorStage(config, description="GliNER Processor"))
 
