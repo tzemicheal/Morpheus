@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 import typing
 
 import mrc
@@ -28,6 +29,8 @@ from morpheus.pipeline.control_message_stage import ControlMessageStage
 from morpheus.pipeline.execution_mode_mixins import GpuAndCpuMixin
 from morpheus.utils.type_aliases import SeriesType
 from morpheus.utils.type_utils import get_df_class
+
+logger = logging.getLogger(f"morpheus.{__name__}")
 
 
 @register_stage("dlp_input_processor", modes=[PipelineModes.NLP])
@@ -53,7 +56,7 @@ class DLPInputProcessor(GpuAndCpuMixin, ControlMessageStage):
                  *,
                  column_name: str = "source_text",
                  chunking_size: int = 1000,
-                 use_chunking: bool = False):
+                 use_chunking: bool = True):
         super().__init__(config)
         self.column_name = column_name
         self.chunking_size = chunking_size
@@ -74,6 +77,35 @@ class DLPInputProcessor(GpuAndCpuMixin, ControlMessageStage):
     def supports_cpp_node(self):
         # Enable support by default
         return False
+
+    def split_text_by_words(self, text: str, chunk_size: int = 1000, by_paragraphs: bool = False) -> list[str]:
+        """
+        Split text into chunks based on word count.
+
+        Args:
+            text: The text to split
+            chunk_size: Number of words per chunk
+
+        Returns:
+            List of text chunks
+        """
+
+        if by_paragraphs:
+            paragraphs = text.split('\n')
+            chunks = []
+
+            for para in paragraphs:
+                words = para.split()
+                chunks.append(' '.join(words))
+        else:
+            words = text.split()
+            chunks = []
+
+            for i in range(0, len(words), chunk_size):
+                chunk_words = words[i:i + chunk_size]
+                chunks.append(' '.join(chunk_words))
+
+        return chunks
 
     def preprocess(self, msg: MessageMeta) -> ControlMessage:
         """
@@ -100,8 +132,9 @@ class DLPInputProcessor(GpuAndCpuMixin, ControlMessageStage):
 
                     # For larger texts, split into chunks to optimize processing
                     if self.use_chunking:
-                        # Split by paragraphs first to preserve content boundaries
-                        paragraphs = normalized_text.split('\n\n')
+                        new_rows.extend(self.split_text_by_words(normalized_text, self.chunking_size))
+                        # # Split by paragraphs first to preserve content boundaries
+                        paragraphs = normalized_text.split('\n')
                         current_chunk = []
                         current_chunk_len = 0
 
@@ -112,7 +145,7 @@ class DLPInputProcessor(GpuAndCpuMixin, ControlMessageStage):
                                 current_chunk_len = len(para)
                             else:
                                 if len(current_chunk) > 0:
-                                    current_chunk.append("\n\n")
+                                    current_chunk.append("\n")
                                     current_chunk_len += 2
 
                                 current_chunk.append(para)
@@ -124,9 +157,11 @@ class DLPInputProcessor(GpuAndCpuMixin, ControlMessageStage):
                     else:
                         new_rows.append(normalized_text)
 
+                logger.info("New rows %d", len(new_rows))
                 new_df = self.df_class({self.column_name: new_rows})
                 meta = MessageMeta(new_df)
-
+        # import IPython
+        # IPython.embed()
         control_msg = ControlMessage()
         control_msg.payload(meta)
 

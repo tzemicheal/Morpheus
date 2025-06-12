@@ -120,7 +120,6 @@ class RegexProcessor(GpuAndCpuMixin, ControlMessageStage):
         with msg.payload().mutable_dataframe() as df:
             # Extract the text column to process
             text_series = df[self.source_column_name]
-
             for pattern_name, pattern in self.combined_patterns.items():
                 output_column = self._output_columns[pattern_name]
                 df[output_column] = text_series.str.findall(pattern)
