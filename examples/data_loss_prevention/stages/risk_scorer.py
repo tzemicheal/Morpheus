@@ -35,20 +35,16 @@ class RiskScorer(GpuAndCpuMixin, ControlMessageStage):
 
     DEFAULT_TYPE_WEIGHTS = {
         "password": 85,
-        "credit_card": 90,
+        "credit_card_number": 90,
         "ssn": 95,
         "address": 60,
         "email": 40,
-        "phone_us": 45,
-        "phone_numbers": 45,
-        "ip_address": 30,
+        "phone_number": 45,
+        "ipv4": 30,
         "date": 20,
-        "api_key": 80,
-        "customer_id": 65,  # Semantic categories
-        "personal": 70,
-        "financial": 85,
-        "health": 75,
-        "api_credentials": 75
+        "customer_id": 65,  
+        "bank_routing_number": 85,
+        "medical_record_number": 75,
     }
 
     def __init__(self, config: Config, *, type_weights: dict[str, int] | None = None, default_weight: int = 50):
