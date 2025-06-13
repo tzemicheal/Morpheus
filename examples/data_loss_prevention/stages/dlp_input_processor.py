@@ -17,17 +17,15 @@ import logging
 import typing
 
 import mrc
-import pandas as pd
 from mrc.core import operators as ops
 
 from morpheus.cli.register_stage import register_stage
 from morpheus.config import Config
 from morpheus.config import PipelineModes
-from morpheus.messages import ControlMessage
 from morpheus.messages import MessageMeta
-from morpheus.pipeline.control_message_stage import ControlMessageStage
 from morpheus.pipeline.execution_mode_mixins import GpuAndCpuMixin
-from morpheus.pipeline.preallocator_mixin import PreallocatorMixin
+from morpheus.pipeline.pass_thru_type_mixin import PassThruTypeMixin
+from morpheus.pipeline.single_port_stage import SinglePortStage
 from morpheus.utils.type_aliases import SeriesType
 from morpheus.utils.type_utils import get_df_class
 
@@ -35,7 +33,7 @@ logger = logging.getLogger(f"morpheus.{__name__}")
 
 
 @register_stage("dlp_input_processor", modes=[PipelineModes.NLP])
-class DLPInputProcessor(PreallocatorMixin, GpuAndCpuMixin, ControlMessageStage):
+class DLPInputProcessor(GpuAndCpuMixin, PassThruTypeMixin, SinglePortStage):
     """
     Handles input text processing and normalization for DLP pipeline
 
@@ -49,7 +47,7 @@ class DLPInputProcessor(PreallocatorMixin, GpuAndCpuMixin, ControlMessageStage):
         If True, splits input text into chunks. Defaults to False.
     """
 
-    def __init__(self, config: Config, *, column_name: str = "source_text", split_paragraphs: bool = False):
+    def __init__(self, config: Config, *, column_name: str = "source_text", split_paragraphs: bool = True):
         super().__init__(config)
         self.column_name = column_name
         self.split_paragraphs = split_paragraphs
@@ -70,36 +68,7 @@ class DLPInputProcessor(PreallocatorMixin, GpuAndCpuMixin, ControlMessageStage):
         # Enable support by default
         return False
 
-    def split_text_by_words(self, text: str, chunk_size: int = 1000, by_paragraphs: bool = False) -> list[str]:
-        """
-        Split text into chunks based on word count.
-
-        Args:
-            text: The text to split
-            chunk_size: Number of words per chunk
-
-        Returns:
-            List of text chunks
-        """
-
-        if by_paragraphs:
-            paragraphs = text.split('\n')
-            chunks = []
-
-            for para in paragraphs:
-                words = para.split()
-                chunks.append(' '.join(words))
-        else:
-            words = text.split()
-            chunks = []
-
-            for i in range(0, len(words), chunk_size):
-                chunk_words = words[i:i + chunk_size]
-                chunks.append(' '.join(chunk_words))
-
-        return chunks
-
-    def preprocess(self, msg: MessageMeta) -> ControlMessage:
+    def preprocess(self, msg: MessageMeta) -> MessageMeta:
         """
         Preprocess input text:
         1. Normalize whitespace
@@ -127,10 +96,7 @@ class DLPInputProcessor(PreallocatorMixin, GpuAndCpuMixin, ControlMessageStage):
                 merged_df.reset_index(drop=False, inplace=True)
                 meta = MessageMeta(merged_df)
 
-        control_msg = ControlMessage()
-        control_msg.payload(meta)
-
-        return control_msg
+        return meta
 
     def _build_single(self, builder: mrc.Builder, input_node: mrc.SegmentObject) -> mrc.SegmentObject:
         node = builder.make_node(self.unique_name, ops.map(self.preprocess))
