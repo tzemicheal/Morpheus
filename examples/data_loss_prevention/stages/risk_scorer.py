@@ -142,7 +142,7 @@ class RiskScorer(GpuAndCpuMixin, ControlMessageStage):
 
         # Normalize to 0-100 scale with diminishing returns for many findings
         max_score = 100
-        normalization_factor = max(1, math.log2(len(findings) + 1)) * 20  # Adjust scaling factor
+        normalization_factor = max(1, math.log2(len(findings) + 1)) * 2  # Adjust scaling factor
 
         # Calculate normalized risk score
         risk_score = round(min(max_score, total_score / normalization_factor))
