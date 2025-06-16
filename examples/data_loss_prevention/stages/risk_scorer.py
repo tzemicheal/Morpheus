@@ -13,8 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import math
-
 import mrc
 import pandas as pd
 from mrc.core import operators as ops
@@ -50,7 +48,12 @@ class RiskScorer(GpuAndCpuMixin, ControlMessageStage):
         "medical_record_number": 75
     }
 
-    def __init__(self, config: Config, *, type_weights: dict[str, int] | None = None, default_weight: int = 50):
+    def __init__(self,
+                 config: Config,
+                 *,
+                 findings_column: str,
+                 type_weights: dict[str, int] | None = None,
+                 default_weight: int = 50):
         """Initialize with configuration for risk scoring"""
         super().__init__(config)
 
@@ -62,6 +65,7 @@ class RiskScorer(GpuAndCpuMixin, ControlMessageStage):
         # Default weight if type not in dictionary
         self.default_weight = default_weight
 
+        self._findings_column = findings_column
         self._df_pkg = get_df_pkg(config.execution_mode)
 
     @property
@@ -78,53 +82,60 @@ class RiskScorer(GpuAndCpuMixin, ControlMessageStage):
     def _risk_score_to_level(risk_score: int) -> str:
         """Convert risk score to risk level string"""
         if risk_score >= 80:
-            return "Critical"
+            return "critical"
 
         if risk_score >= 60:
-            return "High"
+            return "high"
 
         if risk_score >= 40:
-            return "Medium"
+            return "medium"
 
         if risk_score >= 20:
-            return "Low"
+            return "low"
 
-        return "Minimal"
+        return "minimal"
 
     def _score_fn(self, row_index: int, group_df: pd.DataFrame) -> pd.DataFrame | None:
 
-        findings = group_df.dlp_findings
+        findings = group_df[self._findings_column]
 
         if findings is None:
             return None
 
         flat_findings = []
         for finding in findings:
+            if isinstance(finding, str):
+                finding = [s.strip() for s in finding.split(',')]
+
             flat_findings.extend(finding)
 
         findings = flat_findings
+
         if len(findings) == 0:
             return None
 
         # Calculate total weighted score
         total_score = 0
-        num_high = 0
-        num_medium = 0
-        num_low = 0
+        score_counts = {"low": 0, "medium": 0, "high": 0, "critical": 0, "minimal": 0}
 
         data_types_found = set()
         highest_confidence = 0
 
         for finding in findings:
-            # Get data type (either direct type or mapped from semantic)
-            data_type: str = finding["label"]
+            # When `finding` is a dict it came from the GliNER processor, if not then it was bypassed
+            if isinstance(finding, dict):
+                data_type: str = finding["label"]
+
+                # Adjust by confidence
+                confidence = finding["score"]
+            else:
+                data_type = finding
+                confidence = 1.0
+
             data_types_found.add(data_type)
 
             # Get weight for this data type
             weight = self.type_weights.get(data_type, self.default_weight)
-
-            # Adjust by confidence
-            confidence = finding["score"]
 
             if confidence > highest_confidence:
                 highest_confidence = confidence
@@ -133,34 +144,29 @@ class RiskScorer(GpuAndCpuMixin, ControlMessageStage):
             total_score += weighted_score
 
             # Count by severity
-            if weight >= 80:
-                num_high += 1
-            elif weight >= 50:
-                num_medium += 1
-            else:
-                num_low += 1
+            score_counts[self._risk_score_to_level(weight)] += 1
 
         # Normalize to 0-100 scale with diminishing returns for many findings
         max_score = 100
-        normalization_factor = max(1, math.log2(len(findings) + 1)) * 2  # Adjust scaling factor
 
         # Calculate normalized risk score
-        risk_score = round(min(max_score, total_score / normalization_factor))
+        risk_score = round(min(max_score, total_score / len(findings)))
 
         # Determine risk level from score
-        risk_level = self._risk_score_to_level(risk_score)
+        risk_level = self._risk_score_to_level(risk_score).title()
 
-        return pd.DataFrame({
+        df_data = {
             "original_source_index": row_index,
             "risk_score": [risk_score],
             "risk_level": [risk_level],
             "data_types_found": [sorted(data_types_found)],
             "highest_confidence": [highest_confidence],
-            "num_high": [num_high],
-            "num_medium": [num_medium],
-            "num_low": [num_low],
-            "dlp_findings": [findings]
-        })
+            self._findings_column: [findings]
+        }
+
+        df_data.update({f"num_{level}": [count] for (level, count) in score_counts.items()})
+
+        return pd.DataFrame(df_data)
 
     def score(self, msg: ControlMessage) -> ControlMessage:
         """
