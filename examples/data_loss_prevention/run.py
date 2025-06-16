@@ -86,7 +86,7 @@ MORPHEUS_ROOT = os.environ.get('MORPHEUS_ROOT', os.path.abspath(os.path.join(CUR
               default=False,
               show_default=True,
               help=("Only perform regex matching and skip the GliNER processor."))
-@click.option("--server_url", required=True, help="Tritonserver url.", default="localhost:8001")
+@click.option("--server_url", required=True, help="Tritonserver url.", default="localhost:8001", show_default=True)
 @click.option('--model_max_batch_size',
               type=int,
               default=16,
@@ -96,7 +96,7 @@ MORPHEUS_ROOT = os.environ.get('MORPHEUS_ROOT', os.path.abspath(os.path.join(CUR
 @click.option('--model_source_dir',
               help="Directory containing the GliNER model files",
               type=click.Path(exists=True, dir_okay=True, file_okay=False, readable=True, resolve_path=True),
-              default=os.path.join(CUR_DIR, "model/gliner_bi_encoder"),
+              default=os.path.join(MORPHEUS_ROOT, "models/dlp_models/gliner_bi_encoder"),
               show_default=True)
 @click.option("--out_file",
               help="Output file",
