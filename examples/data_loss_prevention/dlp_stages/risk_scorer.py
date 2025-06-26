@@ -13,11 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import functools
 import time
 
 import mrc
 import numpy as np
-import pandas as pd
 from mrc.core import operators as ops
 
 from morpheus.cli.register_stage import register_stage
@@ -26,6 +26,8 @@ from morpheus.messages import ControlMessage
 from morpheus.messages import MessageMeta
 from morpheus.pipeline.control_message_stage import ControlMessageStage
 from morpheus.pipeline.execution_mode_mixins import GpuAndCpuMixin
+from morpheus.utils.type_aliases import DataFrameType
+from morpheus.utils.type_utils import get_df_class
 from morpheus.utils.type_utils import get_df_pkg
 
 
@@ -54,7 +56,6 @@ class RiskScorer(GpuAndCpuMixin, ControlMessageStage):
     _NEW_COLUMNS = {
         "risk_score": 0,
         "risk_level": '',
-        "data_types_found": np.nan,
         "highest_confidence": 0.0,
         "num_minimal": 0,
         "num_low": 0,
@@ -81,9 +82,10 @@ class RiskScorer(GpuAndCpuMixin, ControlMessageStage):
         self.default_weight = default_weight
 
         self._findings_column = findings_column
+        self._df_class = get_df_class(config.execution_mode)
         self._df_pkg = get_df_pkg(config.execution_mode)
         self._elapsed_time_secs = 0.0
-        self._group_cols = [self._findings_column] + list(self._NEW_COLUMNS.keys())
+        self._group_cols = [self._findings_column, "data_types_found"] + list(self._NEW_COLUMNS.keys())
 
     @property
     def name(self) -> str:
@@ -112,9 +114,15 @@ class RiskScorer(GpuAndCpuMixin, ControlMessageStage):
 
         return "minimal"
 
-    def _score_fn(self, group_df: pd.DataFrame) -> pd.Series | None:
+    def _score_fn(self,
+                  group_df: DataFrameType,
+                  *,
+                  findings_column: str,
+                  type_weights: dict[str, int],
+                  default_weight: int,
+                  df_class: type) -> DataFrameType | None:
 
-        findings = group_df[self._findings_column]
+        findings = group_df[findings_column].to_pandas()
 
         if findings is None:
             return None
@@ -152,7 +160,7 @@ class RiskScorer(GpuAndCpuMixin, ControlMessageStage):
             data_types_found.add(data_type)
 
             # Get weight for this data type
-            weight = self.type_weights.get(data_type, self.default_weight)
+            weight = type_weights.get(data_type, default_weight)
 
             if confidence > highest_confidence:
                 highest_confidence = confidence
@@ -161,7 +169,7 @@ class RiskScorer(GpuAndCpuMixin, ControlMessageStage):
             total_score += weighted_score
 
             # Count by severity
-            score_counts[self._risk_score_to_level(weight)] += 1
+            score_counts[RiskScorer._risk_score_to_level(weight)] += 1
 
         # Normalize to 0-100 scale with diminishing returns for many findings
         max_score = 100
@@ -170,19 +178,19 @@ class RiskScorer(GpuAndCpuMixin, ControlMessageStage):
         risk_score = round(min(max_score, total_score / len(findings)))
 
         # Determine risk level from score
-        risk_level = self._risk_score_to_level(risk_score).title()
+        risk_level = RiskScorer._risk_score_to_level(risk_score).title()
 
         df_data = {
             "risk_score": risk_score,
             "risk_level": risk_level,
-            "data_types_found": sorted(data_types_found),
+            "data_types_found": [sorted(data_types_found)],
             "highest_confidence": highest_confidence,
-            self._findings_column: findings
+            findings_column: [findings]
         }
 
         df_data.update({f"num_{level}": count for (level, count) in score_counts.items()})
 
-        return pd.Series(df_data)
+        return df_class(df_data)
 
     def score(self, msg: ControlMessage) -> ControlMessage:
         """
@@ -191,16 +199,16 @@ class RiskScorer(GpuAndCpuMixin, ControlMessageStage):
 
         t1 = time.time()
         with msg.payload().mutable_dataframe() as df:
-            is_pandas = isinstance(df, pd.DataFrame)
-            if not is_pandas:
-                df = df.to_pandas()
-
-        df = df.assign(**self._NEW_COLUMNS)
-        groups = df.groupby(["original_source_index"], as_index=False)
-        result_df = groups[self._group_cols].apply(self._score_fn)
-
-        if not is_pandas:
-            result_df = self._df_pkg.from_pandas(result_df)
+            df = df.assign(**self._NEW_COLUMNS)
+            df["data_types_found"] = self._df_pkg.Series(index=df.index, dtype=self._df_pkg.core.dtypes.ListDtype)
+            groups = df.groupby(["original_source_index"], as_index=False)
+            score_fn = functools.partial(self._score_fn,
+                                         findings_column=self._findings_column,
+                                         type_weights=self.type_weights,
+                                         default_weight=self.default_weight,
+                                         df_class=self._df_class)
+            result_df = groups[self._group_cols].apply(score_fn)
+            result_df = result_df.rename(columns={'index': 'original_source_index'})
 
         msg.payload(MessageMeta(result_df))
 
