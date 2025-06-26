@@ -13,7 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import time
+
 import mrc
+import numpy as np
 import pandas as pd
 from mrc.core import operators as ops
 
@@ -48,6 +51,18 @@ class RiskScorer(GpuAndCpuMixin, ControlMessageStage):
         "medical_record_number": 75
     }
 
+    _NEW_COLUMNS = {
+        "risk_score": 0,
+        "risk_level": '',
+        "data_types_found": np.nan,
+        "highest_confidence": 0.0,
+        "num_minimal": 0,
+        "num_low": 0,
+        "num_medium": 0,
+        "num_high": 0,
+        "num_critical": 0
+    }
+
     def __init__(self,
                  config: Config,
                  *,
@@ -67,6 +82,8 @@ class RiskScorer(GpuAndCpuMixin, ControlMessageStage):
 
         self._findings_column = findings_column
         self._df_pkg = get_df_pkg(config.execution_mode)
+        self._elapsed_time_secs = 0.0
+        self._group_cols = [self._findings_column] + list(self._NEW_COLUMNS.keys())
 
     @property
     def name(self) -> str:
@@ -95,7 +112,7 @@ class RiskScorer(GpuAndCpuMixin, ControlMessageStage):
 
         return "minimal"
 
-    def _score_fn(self, row_index: int, group_df: pd.DataFrame) -> pd.DataFrame | None:
+    def _score_fn(self, group_df: pd.DataFrame) -> pd.Series | None:
 
         findings = group_df[self._findings_column]
 
@@ -105,9 +122,9 @@ class RiskScorer(GpuAndCpuMixin, ControlMessageStage):
         flat_findings = []
         for finding in findings:
             if isinstance(finding, str):
-                finding = [s.strip() for s in finding.split(',')]
-
-            flat_findings.extend(finding)
+                flat_findings.extend(s.strip() for s in finding.split(','))
+            else:
+                flat_findings.extend(finding)
 
         findings = flat_findings
 
@@ -156,46 +173,46 @@ class RiskScorer(GpuAndCpuMixin, ControlMessageStage):
         risk_level = self._risk_score_to_level(risk_score).title()
 
         df_data = {
-            "original_source_index": row_index,
-            "risk_score": [risk_score],
-            "risk_level": [risk_level],
-            "data_types_found": [sorted(data_types_found)],
-            "highest_confidence": [highest_confidence],
-            self._findings_column: [findings]
+            "risk_score": risk_score,
+            "risk_level": risk_level,
+            "data_types_found": sorted(data_types_found),
+            "highest_confidence": highest_confidence,
+            self._findings_column: findings
         }
 
-        df_data.update({f"num_{level}": [count] for (level, count) in score_counts.items()})
+        df_data.update({f"num_{level}": count for (level, count) in score_counts.items()})
 
-        return pd.DataFrame(df_data)
+        return pd.Series(df_data)
 
     def score(self, msg: ControlMessage) -> ControlMessage:
         """
         Calculate risk scores based on findings
         """
 
+        t1 = time.time()
         with msg.payload().mutable_dataframe() as df:
             is_pandas = isinstance(df, pd.DataFrame)
             if not is_pandas:
                 df = df.to_pandas()
 
+        df = df.assign(**self._NEW_COLUMNS)
         groups = df.groupby(["original_source_index"], as_index=False)
-        results = []
-        for (original_source_index, group_df) in groups:
-            scored_df = self._score_fn(original_source_index, group_df)
-            if scored_df is not None:
-                results.append(scored_df)
-
-        result_df = pd.concat(results, axis=0)
+        result_df = groups[self._group_cols].apply(self._score_fn)
 
         if not is_pandas:
             result_df = self._df_pkg.from_pandas(result_df)
 
         msg.payload(MessageMeta(result_df))
 
+        t2 = time.time()
+        self._elapsed_time_secs += t2 - t1
         return msg
 
+    def _on_completed(self) -> None:
+        print(f"RiskScorer completed in {self._elapsed_time_secs:.2f} seconds")
+
     def _build_single(self, builder: mrc.Builder, input_node: mrc.SegmentObject) -> mrc.SegmentObject:
-        node = builder.make_node(self.unique_name, ops.map(self.score))
+        node = builder.make_node(self.unique_name, ops.map(self.score), ops.on_completed(self._on_completed))
         builder.make_edge(input_node, node)
 
         return node
