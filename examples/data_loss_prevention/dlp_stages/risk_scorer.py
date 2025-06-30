@@ -14,10 +14,8 @@
 # limitations under the License.
 
 import functools
-import time
 
 import mrc
-import numpy as np
 from mrc.core import operators as ops
 
 from morpheus.cli.register_stage import register_stage
@@ -98,7 +96,8 @@ class RiskScorer(GpuAndCpuMixin, ControlMessageStage):
         self._findings_column = findings_column
         self._df_class = get_df_class(config.execution_mode)
         self._df_pkg = get_df_pkg(config.execution_mode)
-        self._group_cols = [self._findings_column] + list(self._NEW_COLUMNS.keys())
+        self._elapsed_time_secs = 0.0
+        self._group_cols = [self._findings_column, "data_types_found"] + list(self._NEW_COLUMNS.keys())
 
     @property
     def name(self) -> str:
