@@ -13,8 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import functools
-import time
 
 import mrc
 from mrc.core import operators as ops
@@ -29,7 +27,7 @@ from morpheus.utils.type_aliases import DataFrameType
 from morpheus.utils.type_utils import get_df_class
 from morpheus.utils.type_utils import get_df_pkg
 import pandas as pd
-import numpy as np
+import cudf
 
 @register_stage("risk-scorer")
 class RiskScorer(GpuAndCpuMixin, ControlMessageStage):
@@ -117,11 +115,29 @@ class RiskScorer(GpuAndCpuMixin, ControlMessageStage):
     @staticmethod
     def _risk_score_to_level_vectorized(scores: pd.Series) -> pd.Series:
         """Vectorized risk level calculation"""
-        return pd.cut(scores, 
+        return cudf.cut(scores, 
                      bins=[0, 30, 50, 70, 90, 101], 
                      labels=["minimal", "low", "medium", "high", "critical"])
     
-    def _score_fn(self,
+    def _score_fn_gp(self,
+                  group_df: DataFrameType,
+                  *,
+                  findings_column: str,
+                  type_weights: dict[str, int],
+                  default_weight: int,
+                  df_class: type) -> DataFrameType | None:
+        
+        
+        findings : cudf.DataFrame = group_df[findings_column]
+        if findings is None or len(findings) == 0 :
+            return None
+        pass
+        
+        
+        
+        
+    
+    def _score_fn_pd(self,
                   group_df: DataFrameType,
                   *,
                   findings_column: str,
@@ -235,206 +251,101 @@ class RiskScorer(GpuAndCpuMixin, ControlMessageStage):
         return df_class(result_data)
         
         
-    
-    def _score_fn_vc(self,
-                  group_df: DataFrameType,
-                  *,
-                  findings_column: str,
-                  type_weights: dict[str, int],
-                  default_weight: int,
-                  df_class: type) -> DataFrameType | None:
+    def _score_fn(self, group_df: pd.DataFrame) -> pd.Series | None:
 
-        findings = group_df[findings_column].to_pandas()
+        findings = group_df[self._findings_column]
 
-        if findings is None or findings.empty:
+        if findings is None:
             return None
 
         flat_findings = []
-        original_indices = []
-        
-        # for finding in findings:
-        #     if isinstance(finding, str):
-        #         flat_findings.extend(s.strip() for s in finding.split(','))
-        #     else:
-        #         flat_findings.extend(finding)
-        
-        for idx, finding_list in findings_series.items():
-            if not finding_list:
-                continue
-                
-            # Flatten findings
-            flattened = []
-            for finding in finding_list:
-                if isinstance(finding, str):
-                    flattened.extend(s.strip() for s in finding.split(','))
-                else:
-                    flattened.append(finding)
-            
-            all_findings.extend(flattened)
-            original_indices.extend([idx] * len(flattened))
-                
-            original_indices.extend([idx] * len(flattened))
+        for finding in findings:
+            if isinstance(finding, str):
+                flat_findings.extend(s.strip() for s in finding.split(','))
+            else:
+                flat_findings.extend(finding)
 
         findings = flat_findings
 
         if len(findings) == 0:
             return None
-        # Process all findings at once
-       
-        # Create weight mapping series for fast lookup
-        weights_series = pd.Series(type_weights)
-        
-        # Create processing DataFrame
-        process_df = pd.DataFrame({
-            'original_index': original_indices,
-            'finding': findings
-        })
-        
-        # Vectorized processing of findings
-        is_dict = process_df['finding'].apply(lambda x: isinstance(x, dict))
-        
-         # Extract data types and confidences vectorized
-        process_df['data_type'] = np.where(
-            is_dict,
-            process_df['finding'].apply(lambda x: x.get('label', '') if isinstance(x, dict) else ''),
-            process_df['finding'].astype(str)
-        )
-        
-        process_df['confidence'] = np.where(
-            is_dict,
-            process_df['finding'].apply(lambda x: x.get('score', 1.0) if isinstance(x, dict) else 1.0),
-            1.0
-        )
-        # Vectorized weight mapping
-        process_df['weight'] = process_df['data_type'].map(weights_series).fillna(default_weight)
-        
-        # Vectorized score calculation
-        process_df['weighted_score'] = process_df['weight'] * process_df['confidence']
-        process_df['risk_level'] = self._risk_score_to_level_vectorized(process_df['weight'])
-        
-        # Aggregation using optimized groupby
-        agg_data = process_df.groupby('original_index').agg({
-            'weighted_score': 'sum',
-            'confidence': 'max',
-            'data_type': lambda x: sorted(set(x)),
-            'finding': 'count',  # Count for normalization
-            'risk_level': lambda x: x.value_counts().to_dict()
-        })
-        
-        # Final calculations
-        agg_data['risk_score'] = (agg_data['weighted_score'] / agg_data['finding']).round().clip(0, 100).astype(int)
-        agg_data['final_risk_level'] = self._risk_score_to_level_vectorized(agg_data['risk_score'])
-        
-        
-        
-        # Extract the first (and likely only) result
-        #if len(agg_data) > 0:
-        from IPython import embed; embed()
-        first_result = agg_data.iloc[0]
-        
-        # Extract score counts
-        score_counts = first_result['risk_level'] if isinstance(first_result['risk_level'], dict) else {}
-        
-        result_data = {
-            "risk_score": first_result['risk_score'],
-            "risk_level": first_result['final_risk_level'].title() if hasattr(first_result['final_risk_level'], 'title') else str(first_result['final_risk_level']).title(),
-            "data_types_found": [first_result['data_type']],
-            "highest_confidence": first_result['confidence'],
-            findings_column: [findings]
+
+        # Calculate total weighted score
+        total_score = 0
+        score_counts = {"low": 0, "medium": 0, "high": 0, "critical": 0, "minimal": 0}
+
+        data_types_found = set()
+        highest_confidence = 0
+
+        for finding in findings:
+            # When `finding` is a dict it came from the GliNER processor, if not then it was bypassed
+            if isinstance(finding, dict):
+                data_type: str = finding["label"]
+
+                # Adjust by confidence
+                confidence = finding["score"]
+            else:
+                data_type = finding
+                confidence = 1.0
+
+            data_types_found.add(data_type)
+
+            # Get weight for this data type
+            weight = self.type_weights.get(data_type, self.default_weight)
+
+            if confidence > highest_confidence:
+                highest_confidence = confidence
+
+            weighted_score = weight * confidence
+            total_score += weighted_score
+
+            # Count by severity
+            score_counts[self._risk_score_to_level(weight)] += 1
+
+        # Normalize to 0-100 scale with diminishing returns for many findings
+        max_score = 100
+
+        # Calculate normalized risk score
+        risk_score = round(min(max_score, total_score / len(findings)))
+
+        # Determine risk level from score
+        risk_level = self._risk_score_to_level(risk_score).title()
+
+        df_data = {
+            "risk_score": risk_score,
+            "risk_level": risk_level,
+            "data_types_found": sorted(data_types_found),
+            "highest_confidence": highest_confidence,
+            self._findings_column: findings
         }
-        
-        # Add individual score counts
-        for level in ["low", "medium", "high", "critical", "minimal"]:
-            result_data[f"num_{level}"] = score_counts.get(level, 0)
-        
-        # df_data.update({f"num_{level}": count for (level, count) in score_counts.items()})
-        return df_class(result_data)
-            
-            #return df_class(result_data)
-        
-        # # Calculate total weighted score
-        # total_score = 0
-        # score_counts = {"low": 0, "medium": 0, "high": 0, "critical": 0, "minimal": 0}
 
-        # data_types_found = set()
-        # highest_confidence = 0
+        df_data.update({f"num_{level}": count for (level, count) in score_counts.items()})
 
-        # for finding in findings:
-        #     # When `finding` is a dict it came from the GliNER processor, if not then it was bypassed
-        #     if isinstance(finding, dict):
-        #         data_type: str = finding["label"]
-
-        #         # Adjust by confidence
-        #         confidence = finding["score"]
-        #     else:
-        #         data_type = finding
-        #         confidence = 1.0
-
-        #     data_types_found.add(data_type)
-
-        #     # Get weight for this data type
-        #     weight = type_weights.get(data_type, default_weight)
-
-        #     if confidence > highest_confidence:
-        #         highest_confidence = confidence
-
-        #     weighted_score = weight * confidence
-        #     total_score += weighted_score
-
-        #     # Count by severity
-        #     score_counts[RiskScorer._risk_score_to_level(weight)] += 1
-
-        # # Normalize to 0-100 scale with diminishing returns for many findings
-        # max_score = 100
-
-        # # Calculate normalized risk score
-        # risk_score = round(min(max_score, total_score / len(findings)))
-
-        # # Determine risk level from score
-        # risk_level = RiskScorer._risk_score_to_level(risk_score).title()
-
-        # df_data = {
-        #     "risk_score": risk_score,
-        #     "risk_level": risk_level,
-        #     "data_types_found": [sorted(data_types_found)],
-        #     "highest_confidence": highest_confidence,
-        #     findings_column: [findings]
-        # }
-
-        # df_data.update({f"num_{level}": count for (level, count) in score_counts.items()})
-
-        # return df_class(df_data)
+        return pd.Series(df_data)
 
     def score(self, msg: ControlMessage) -> ControlMessage:
         """
         Calculate risk scores based on findings
         """
 
-        t1 = time.time()
         with msg.payload().mutable_dataframe() as df:
-            df = df.assign(**self._NEW_COLUMNS)
-            df["data_types_found"] = self._df_pkg.Series(index=df.index, dtype=self._df_pkg.core.dtypes.ListDtype)
-            groups = df.groupby(["original_source_index"], as_index=False)
-            score_fn = functools.partial(self._score_fn,
-                                         findings_column=self._findings_column,
-                                         type_weights=self.type_weights,
-                                         default_weight=self.default_weight,
-                                         df_class=self._df_class)
-            result_df = groups[self._group_cols].apply(score_fn)
-            #from IPython import embed; embed()
-            result_df = result_df.rename(columns={'index': 'original_source_index'})
+            is_pandas = isinstance(df, pd.DataFrame)
+            if not is_pandas:
+                df = df.to_pandas()
+
+        df = df.assign(**self._NEW_COLUMNS)
+        groups = df.groupby(["original_source_index"], as_index=False)
+        result_df = groups[self._group_cols].apply(self._score_fn)
+
+        if not is_pandas:
+            result_df = self._df_pkg.from_pandas(result_df)
 
         msg.payload(MessageMeta(result_df))
 
-        t2 = time.time()
-        self._elapsed_time_secs += t2 - t1
-       # self._on_completed()
         return msg
 
-    def _on_completed(self) -> None:
-        print(f"RiskScorer completed in {self._elapsed_time_secs:.2f} seconds")
-
     def _build_single(self, builder: mrc.Builder, input_node: mrc.SegmentObject) -> mrc.SegmentObject:
-        node = builder.make_node(self.unique_name, ops.map(self.score), ops.on_completed(self._on_completed))
+        node = builder.make_node(self.unique_name, ops.map(self.score))
         builder.make_edge(input_node, node)
+
         return node
