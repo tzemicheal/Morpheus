@@ -23,7 +23,6 @@ from morpheus.messages import ControlMessage
 from morpheus.messages import MessageMeta
 from morpheus.pipeline.control_message_stage import ControlMessageStage
 from morpheus.pipeline.execution_mode_mixins import GpuAndCpuMixin
-from morpheus.utils.type_aliases import DataFrameType
 from morpheus.utils.type_utils import get_df_class
 from morpheus.utils.type_utils import get_df_pkg
 import pandas as pd
@@ -111,146 +110,7 @@ class RiskScorer(GpuAndCpuMixin, ControlMessageStage):
             return "low"
 
         return "minimal"
-    
-    @staticmethod
-    def _risk_score_to_level_vectorized(scores: pd.Series) -> pd.Series:
-        """Vectorized risk level calculation"""
-        return cudf.cut(scores, 
-                     bins=[0, 30, 50, 70, 90, 101], 
-                     labels=["minimal", "low", "medium", "high", "critical"])
-    
-    def _score_fn_gp(self,
-                  group_df: DataFrameType,
-                  *,
-                  findings_column: str,
-                  type_weights: dict[str, int],
-                  default_weight: int,
-                  df_class: type) -> DataFrameType | None:
-        
-        
-        findings : cudf.DataFrame = group_df[findings_column]
-        if findings is None or len(findings) == 0 :
-            return None
-        pass
-        
-        
-        
-        
-    
-    def _score_fn_pd(self,
-                  group_df: DataFrameType,
-                  *,
-                  findings_column: str,
-                  type_weights: dict[str, int],
-                  default_weight: int,
-                  df_class: type) -> DataFrameType | None:
-
-        findings = group_df[findings_column].to_pandas()
-        
-        if findings is None or findings.empty:
-            return None
-        
-        findings_df = pd.DataFrame({
-            'original_index': findings.index,
-            'findings': findings
-        })
-        
-        exploded_df = findings_df.explode('findings').dropna(subset=['findings'])
-        if exploded_df.empty:
-            return None
-        
-        # Step 2: Handle string splitting and flattening in vectorized way
-        def flatten_finding(finding):
-            """Flatten a single finding (string or dict)"""
-            if isinstance(finding, str):
-                return [s.strip() for s in finding.split(',')]
-            else:
-                return [finding] if not isinstance(finding, list) else finding
-        
-        # Apply flattening and explode again
-        exploded_df['flattened_findings'] = exploded_df['findings'].apply(flatten_finding)
-        final_df = exploded_df.explode('flattened_findings').dropna(subset=['flattened_findings'])
-        
-        if final_df.empty:
-            return None
-        
-        # Step 3: Separate dict and string findings using vectorized operations
-        is_dict_mask = final_df['flattened_findings'].apply(lambda x: isinstance(x, dict))
-        
-        # Process dict findings (from GliNER processor)
-        dict_findings = final_df[is_dict_mask].copy()
-        if not dict_findings.empty:
-            dict_findings['data_type'] = dict_findings['flattened_findings'].apply(lambda x: x['label'])
-            dict_findings['confidence'] = dict_findings['flattened_findings'].apply(lambda x: x['score'])
-        
-        # Process string findings (bypassed)
-        str_findings = final_df[~is_dict_mask].copy()
-        if not str_findings.empty:
-            str_findings['data_type'] = str_findings['flattened_findings']
-            str_findings['confidence'] = 1.0
-        
-        # Combine both types
-        if not dict_findings.empty and not str_findings.empty:
-            processed_df = pd.concat([dict_findings, str_findings], ignore_index=True)
-        elif not dict_findings.empty:
-            processed_df = dict_findings
-        else:
-            processed_df = str_findings
-        
-        # Step 4: Vectorized weight mapping and score calculation
-        processed_df['weight'] = processed_df['data_type'].map(type_weights).fillna(default_weight)
-        processed_df['weighted_score'] = processed_df['weight'] * processed_df['confidence']
-        
-        # Step 5: Vectorized risk level calculation
-        processed_df['risk_level'] = processed_df['weight'].apply(self._risk_score_to_level)
-        
-        
-        # Step 6: Aggregate results using pandas groupby operations
-        agg_results = processed_df.groupby('original_index').agg({
-            'weighted_score': 'sum',
-            'confidence': 'max',
-            'data_type': lambda x: sorted(set(x)),
-            'risk_level': lambda x: pd.Series(x).value_counts().to_dict()
-        }).reset_index()
-        
-        # Step 7: Calculate final metrics
-        findings_count = processed_df.groupby('original_index').size()
-        agg_results = agg_results.merge(findings_count.rename('findings_count'), left_on='original_index', right_index=True)
-        
-        # Calculate normalized risk score
-        agg_results['risk_score'] = (agg_results['weighted_score'] / agg_results['findings_count']).round().clip(0, 100).astype(int)
-        agg_results['risk_level_final'] = agg_results['risk_score'].apply(lambda x: self._risk_score_to_level(x).title())
-        
-        # Step 8: Extract score counts in vectorized way
-        def extract_score_counts(risk_level_dict):
-            return {
-                "low": risk_level_dict.get("low", 0),
-                "medium": risk_level_dict.get("medium", 0), 
-                "high": risk_level_dict.get("high", 0),
-                "critical": risk_level_dict.get("critical", 0),
-                "minimal": risk_level_dict.get("minimal", 0)
-            }
-        
-        score_counts = agg_results['risk_level'].apply(extract_score_counts)
-        
-        # Step 9: Prepare final result DataFrame
-        result_data = {
-            "risk_score": agg_results['risk_score'].iloc[0],
-            "risk_level": agg_results['risk_level_final'].iloc[0],
-            "data_types_found": [agg_results['data_type'].iloc[0]],
-            "highest_confidence": agg_results['confidence'].iloc[0],
-            findings_column: [processed_df['flattened_findings'].tolist()]
-        }
-        
-        
-        # Add score counts to result
-        score_counts_dict = score_counts.iloc[0]
-        for level, count in score_counts_dict.items():
-            result_data[f"num_{level}"] = count
-        
-        return df_class(result_data)
-        
-        
+                
     def _score_fn(self, group_df: pd.DataFrame) -> pd.Series | None:
 
         findings = group_df[self._findings_column]
@@ -322,6 +182,107 @@ class RiskScorer(GpuAndCpuMixin, ControlMessageStage):
         df_data.update({f"num_{level}": count for (level, count) in score_counts.items()})
 
         return pd.Series(df_data)
+    
+    
+    def batch_score_cudf(self, df: cudf.DataFrame) -> cudf.DataFrame:
+        """Run batch score of cudf series"""
+        
+        findings_col = self._findings_column
+        default_weight = self.default_weight
+        weight_map = self.type_weights
+
+        # Step 1: Convert necessary columns to pandas for row-wise parsing
+        df_cpu = df[["original_source_index", findings_col]].to_pandas()
+
+        # Step 2: Flatten findings into rows (CPU)
+        findings_expanded = []
+
+        for _, row in df_cpu.iterrows():
+            source_idx = row["original_source_index"]
+            raw = row[findings_col]
+
+            if isinstance(raw, str):
+                entries = [s.strip() for s in raw.split(',')]
+            elif isinstance(raw, list):
+                entries = raw
+            else:
+                continue
+
+            for item in entries:
+                if isinstance(item, dict):
+                    label = item.get("label")
+                    score = item.get("score", 1.0)
+                else:
+                    label = item
+                    score = 1.0
+
+                findings_expanded.append({
+                    "original_source_index": source_idx,
+                    "label": label,
+                    "score": score
+                })
+
+        if not findings_expanded:
+            return cudf.DataFrame()
+
+        # Step 3: Back to cudf
+        findings_df = cudf.DataFrame(findings_expanded)
+        findings_df["weight"] = findings_df["label"].map(cudf.Series(weight_map)).fillna(default_weight)
+        findings_df["weighted_score"] = findings_df["weight"] * findings_df["score"]
+
+        # Step 4: Assign risk level based on weight (CPU-mapped)
+        levels = findings_df["weight"].to_pandas().map(self._risk_score_to_level)
+        findings_df["level"] = cudf.Series(levels)
+
+        # Step 5: Basic aggregations
+        agg_df = findings_df.groupby("original_source_index").agg({
+            "weighted_score": "sum",
+            "score": "max",
+            "label": "count"
+        })
+
+        agg_df = agg_df.rename(columns={
+            "weighted_score": "total_score",
+            "score": "highest_confidence",
+            "label": "num_findings"
+        })
+
+        # Step 6: Compute data_types_found separately (CPU)
+        label_grouped = (
+            findings_df[["original_source_index", "label"]]
+            .to_pandas()
+            .groupby("original_source_index")["label"]
+            .apply(lambda s: sorted(set(s.dropna())))
+        )
+
+        label_series = cudf.Series(label_grouped)
+        label_series.name = "data_types_found"
+        agg_df = agg_df.join(label_series)
+
+        # Step 7: Calculate risk_score and risk_level
+        agg_df["risk_score"] = (agg_df["total_score"] / agg_df["num_findings"]).clip(upper=100).round().astype("int32")
+        agg_df["risk_level"] = cudf.Series(
+            agg_df["risk_score"].to_pandas().map(self._risk_score_to_level).str.title()
+        )
+
+        # Step 8: Count severity levels
+        level_counts = findings_df.groupby(["original_source_index", "level"]).size().reset_index(name="count")
+        level_pivot = level_counts.pivot(index="original_source_index", columns="level", values="count").fillna(0)
+
+        # Ensure all levels are present
+        for level in ['low', 'medium', 'high', 'critical', 'minimal']:
+            if level not in level_pivot.columns:
+                level_pivot[level] = 0
+
+        # Step 9: Merge everything
+        result_df = agg_df.join(level_pivot, how="left")
+
+        # Rename severity count columns
+        for level in ['low', 'medium', 'high', 'critical', 'minimal']:
+            if level in result_df.columns:
+                result_df = result_df.rename(columns={level: f"num_{level}"})
+
+        return result_df.reset_index()
 
     def score(self, msg: ControlMessage) -> ControlMessage:
         """
@@ -330,15 +291,15 @@ class RiskScorer(GpuAndCpuMixin, ControlMessageStage):
 
         with msg.payload().mutable_dataframe() as df:
             is_pandas = isinstance(df, pd.DataFrame)
-            if not is_pandas:
-                df = df.to_pandas()
+            # if not is_pandas:
+            #     df = df.to_pandas()
 
         df = df.assign(**self._NEW_COLUMNS)
-        groups = df.groupby(["original_source_index"], as_index=False)
-        result_df = groups[self._group_cols].apply(self._score_fn)
-
-        if not is_pandas:
-            result_df = self._df_pkg.from_pandas(result_df)
+        # groups = df.groupby(["original_source_index"], as_index=False)
+        # result_df = groups[self._group_cols].apply(self._score_fn)
+        result_df = self.batch_score_cudf(df)
+        # if not is_pandas:
+        #     result_df = self._df_pkg.from_pandas(result_df)
 
         msg.payload(MessageMeta(result_df))
 
